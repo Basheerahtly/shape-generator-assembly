@@ -1,0 +1,1373 @@
+; ============================================================
+; shapes_menu.asm
+; Combined Shape Generator — 6 Shapes with Main Menu
+;
+; Shapes:
+;   1. Diamond        (diamond_final.asm  — Heiza)
+;   2. Right Triangle (duha.asm           — Duha)
+;   3. Hollow Triangle(hajrah_test.asm    — Hajrah)
+;   4. Parallelogram  (heiza.asm          — Heiza)
+;   5. Square         (jannat.asm         — Jannat)
+;   6. Hollow Rect    (jumanah.asm        — Jumanah)
+;
+; All converted to unified x86-64 Linux syscall ABI.
+; rcx and r11 are clobbered by syscall — never use them as
+; live counters across a syscall. Use r12-r15 / r8-r10 instead.
+;
+; NASM syntax — assemble with:
+;   nasm -f elf64 shapes_menu.asm -o shapes_menu.o
+;   ld shapes_menu.o -o shapes_menu
+; ============================================================
+
+; ============================================================
+; MACRO helpers
+; ============================================================
+
+; PRINT is a shortcut macro — instead of writing 5 lines every time
+; we want to print something, we just write: PRINT label, length
+; It sets up and calls syscall number 1 (sys_write) to stdout (fd 1).
+%macro PRINT 2
+    mov  rax, 1          ; syscall number 1 = sys_write (write to a file/screen)
+    mov  rdi, 1          ; file descriptor 1 = stdout (the terminal screen)
+    mov  rsi, %1         ; address of the text we want to print
+    mov  rdx, %2         ; how many bytes (characters) to print
+    syscall              ; ask the kernel to do it
+%endmacro
+
+; ============================================================
+section .data
+; ============================================================
+; This section holds all fixed text (strings) and constant values.
+; db = "define byte" — stores raw bytes/characters in memory.
+; equ $ - label = calculates the length of the string automatically.
+; 10 = newline character (\n). 27 = ESC character for colour codes.
+
+; ---- Main menu strings ----
+main_banner     db 10,"ics group assignment",10,10   ; title shown at top of menu
+main_banner_len equ $ - main_banner                  ; length of the title string
+
+main_menu_msg   db "  Choose a shape to draw:",10    ; menu header
+                db "  [1] Diamond",10
+                db "  [2] Right Triangle",10
+                db "  [3] Hollow Triangle",10
+                db "  [4] Parallelogram",10
+                db "  [5] Square",10
+                db "  [6] Hollow Rectangle",10
+                db "  [7] Exit",10,10
+                db "  Your choice: "                 ; prompt for the user to type
+main_menu_len   equ $ - main_menu_msg
+
+err_menu        db 10,"  Invalid choice! Enter 1-7.",10,10  ; shown if user types wrong key
+err_menu_len    equ $ - err_menu
+
+goodbye_msg     db 10,"  Thanks for using Shape Generator. Goodbye!",10,10
+goodbye_len     equ $ - goodbye_msg
+
+; Message shown after each shape is drawn, asking what to do next
+again_msg       db 10,"  Draw another shape? [1] Yes  [2] Main menu  [3] Exit: "
+again_len       equ $ - again_msg
+err_again       db 10,"  Invalid. Enter 1, 2 or 3.",10,10   ; shown if response is invalid
+err_again_len   equ $ - err_again
+
+; Single-character constants used during drawing
+newline         db 10     ; the newline character — moves cursor to next line
+space_char      db " "    ; a single space character — used for indentation
+
+; ---- Colour escape codes (ANSI terminal colours) ----
+; Each colour is a special sequence of bytes starting with ESC (27).
+; When printed to the terminal, they change the text colour.
+; Standard colours use "[3Xm" format. Extended colours use "[38;5;Nm" format.
+col_red         db 27,"[31m"
+col_red_len     equ $ - col_red
+col_green       db 27,"[32m"
+col_green_len   equ $ - col_green
+col_yellow      db 27,"[33m"
+col_yellow_len  equ $ - col_yellow
+col_blue        db 27,"[34m"
+col_blue_len    equ $ - col_blue
+col_magenta     db 27,"[35m"
+col_magenta_len equ $ - col_magenta
+col_cyan        db 27,"[36m"
+col_cyan_len    equ $ - col_cyan
+col_white       db 27,"[37m"
+col_white_len   equ $ - col_white
+col_orange      db 27,"[38;5;208m"    ; extended 256-colour code
+col_orange_len  equ $ - col_orange
+col_pink        db 27,"[38;5;213m"
+col_pink_len    equ $ - col_pink
+col_lime        db 27,"[38;5;118m"
+col_lime_len    equ $ - col_lime
+col_skyblue     db 27,"[38;5;117m"
+col_skyblue_len equ $ - col_skyblue
+col_gold        db 27,"[38;5;220m"
+col_gold_len    equ $ - col_gold
+col_purple      db 27,"[38;5;129m"
+col_purple_len  equ $ - col_purple
+col_teal        db 27,"[38;5;30m"
+col_teal_len    equ $ - col_teal
+col_coral       db 27,"[38;5;203m"
+col_coral_len   equ $ - col_coral
+col_reset       db 27,"[0m",10        ; resets colour back to terminal default + newline
+col_reset_len   equ $ - col_reset
+
+; Two lookup tables stored side by side in memory:
+;   col_ptrs — array of 15 addresses, one per colour string
+;   col_lens — array of 15 lengths, one per colour string
+; To use colour N (0-based): multiply N by 8 to get the byte offset,
+; then read the pointer from col_ptrs and the length from col_lens.
+col_ptrs dq col_red,col_green,col_yellow,col_blue,col_magenta,col_cyan,col_white,col_orange,col_pink,col_lime,col_skyblue,col_gold,col_purple,col_teal,col_coral
+col_lens dq col_red_len,col_green_len,col_yellow_len,col_blue_len,col_magenta_len,col_cyan_len,col_white_len,col_orange_len,col_pink_len,col_lime_len,col_skyblue_len,col_gold_len,col_purple_len,col_teal_len,col_coral_len
+
+; Symbols available for random mode — picked by index
+symbol_table    db "*#@+~^=!?&%$"
+symbol_table_len equ $ - symbol_table
+
+dev_urandom     db "/dev/urandom",0   ; path to Linux's random number device (null-terminated)
+
+; ---- Shape 1: Diamond prompts ----
+dmd_menu_msg    db 10,"  Diamond Mode:",10
+                db "  [1] Manual  [2] Random: "
+dmd_menu_len    equ $ - dmd_menu_msg
+dmd_rand_msg    db 10,"  Generating random diamond...",10,10
+dmd_rand_len    equ $ - dmd_rand_msg
+dmd_ph          db "  Diamond half-height (1-100): "   ; half-height = rows in top half
+dmd_ph_len      equ $ - dmd_ph
+dmd_po          db "  Horizontal offset (0-99): "      ; spaces added to the left
+dmd_po_len      equ $ - dmd_po
+dmd_pc          db "  Colour (1=Red 2=Green 3=Yellow 4=Blue 5=Magenta 6=Cyan 7=White 8=Orange",10
+                db "         9=Pink 10=Lime 11=SkyBlue 12=Gold 13=Purple 14=Teal 15=Coral): "
+dmd_pc_len      equ $ - dmd_pc
+dmd_ps          db "  Symbol (e.g. * # @): "
+dmd_ps_len      equ $ - dmd_ps
+err_dmd_h       db "  Height must be 1-100.",10
+err_dmd_h_len   equ $ - err_dmd_h
+err_dmd_o       db "  Offset must be 0-99.",10
+err_dmd_o_len   equ $ - err_dmd_o
+err_dmd_c       db "  Colour must be 1-15.",10
+err_dmd_c_len   equ $ - err_dmd_c
+err_dmd_s       db "  Enter one printable character.",10
+err_dmd_s_len   equ $ - err_dmd_s
+
+; ---- Shape 2: Right Triangle prompts ----
+tri_ph          db 10,"  Right Triangle height (1-9): "
+tri_ph_len      equ $ - tri_ph
+err_tri_h       db "  Height must be 1-9.",10
+err_tri_h_len   equ $ - err_tri_h
+
+; ---- Shape 3: Hollow Triangle prompts ----
+htri_banner     db 10," ----- Hollow Triangle -----",10,10
+htri_banner_len equ $ - htri_banner
+htri_ps         db "  Symbol (visible ASCII character): "
+htri_ps_len     equ $ - htri_ps
+htri_pc         db "  Colour (0=Black 1=Red 2=Green 3=Yellow 4=Blue 5=Magenta 6=Cyan 7=White): "
+htri_pc_len     equ $ - htri_pc
+htri_ph         db "  Height [3-20]: "
+htri_ph_len     equ $ - htri_ph
+htri_px         db "  Horizontal offset [0-40]: "
+htri_px_len     equ $ - htri_px
+err_htri_s      db "  [!] Enter a visible character.",10
+err_htri_s_len  equ $ - err_htri_s
+err_htri_c      db "  [!] Colour must be 0-7.",10
+err_htri_c_len  equ $ - err_htri_c
+err_htri_h      db "  [!] Height must be 3-20.",10
+err_htri_h_len  equ $ - err_htri_h
+err_htri_x      db "  [!] Offset must be 0-40.",10
+err_htri_x_len  equ $ - err_htri_x
+
+; ---- Shape 4: Parallelogram ----
+para_banner     db 10,"=== Parallelogram Generator ===",10
+para_banner_len equ $ - para_banner
+para_rand_msg   db "  (Dimensions are randomly generated)",10,10
+para_rand_len   equ $ - para_rand_msg
+para_wlabel     db "  Width : "
+para_wlabel_len equ $ - para_wlabel
+para_hlabel     db "  Height: "
+para_hlabel_len equ $ - para_hlabel
+para_shape_msg  db 10,"  Shape:",10
+para_shape_len  equ $ - para_shape_msg
+
+; ---- Shape 5: Square prompts ----
+sq_banner       db 10,"=== Square Generator ===",10,10
+sq_banner_len   equ $ - sq_banner
+sq_psize        db "  Size (1-9): "
+sq_psize_len    equ $ - sq_psize
+sq_psym         db "  Symbol: "
+sq_psym_len     equ $ - sq_psym
+sq_pcol         db "  Colour: 1-Red 2-Green 3-Yellow 4-Blue 5-Magenta 6-Cyan: "
+sq_pcol_len     equ $ - sq_pcol
+err_sq_size     db "  Invalid size! Enter 1-9.",10
+err_sq_size_len equ $ - err_sq_size
+err_sq_sym      db "  Invalid symbol! Enter one visible character.",10
+err_sq_sym_len  equ $ - err_sq_sym
+err_sq_col      db "  Invalid colour! Choose 1-6.",10
+err_sq_col_len  equ $ - err_sq_col
+
+; ---- Shape 6: Hollow Rectangle prompts ----
+hrect_banner    db 10,"=== Hollow Rectangle Generator ===",10
+hrect_banner_len equ $ - hrect_banner
+hrect_pw        db "  Width  (1-9): "
+hrect_pw_len    equ $ - hrect_pw
+hrect_ph        db "  Height (1-9): "
+hrect_ph_len    equ $ - hrect_ph
+hrect_shape_msg db 10,"  Shape:",10
+hrect_shape_len equ $ - hrect_shape_msg
+err_hrect       db "  Invalid! Enter a digit 1-9.",10
+err_hrect_len   equ $ - err_hrect
+
+star_char       db "*"     ; the '*' character used for most shapes
+
+; ============================================================
+section .bss
+; ============================================================
+; This section reserves blank (uninitialised) memory for variables.
+; resb N = reserve N bytes. resq N = reserve N 8-byte (64-bit) slots.
+; These values are filled in at runtime by the program.
+
+input       resb 8          ; buffer that holds what the user typed (max 7 chars + newline)
+onebyte     resb 1          ; temporary 1-byte buffer used while reading input one char at a time
+rand_val    resq 1          ; stores the current state of the random number generator
+
+; Diamond shape variables
+dmd_height  resq 1          ; stores the diamond's half-height (number of rows in top half)
+dmd_offset  resq 1          ; stores how many spaces to indent from the left
+dmd_coloridx resb 1         ; index into col_ptrs (0=red, 1=green, etc.)
+dmd_symbol  resb 1          ; the character used to draw the diamond (e.g. '*')
+
+; Hollow triangle variables
+htri_sym    resb 1          ; the character used to draw the triangle outline
+htri_col    resb 1          ; colour number (0-7)
+htri_height resb 1          ; number of rows tall
+htri_x      resb 1          ; horizontal indent (spaces from left)
+htri_colesc resb 8          ; holds the colour escape string built at runtime e.g. ESC[31m
+htri_rowbuf resb 82         ; scratch buffer used to build each row before printing
+htri_sc_mem resd 1          ; temporary: symbol count for current row
+htri_ind_mem resd 1         ; temporary: indent amount for current row
+htri_ct_mem resd 1          ; temporary: general character count
+
+; Parallelogram variables
+para_width  resq 1          ; randomly chosen width (5-14)
+para_height resq 1          ; randomly chosen height (3-7)
+para_seed   resq 1          ; spare seed variable (unused but reserved)
+para_numbuf resb 12         ; scratch space to convert a number to text for printing
+
+; Square variables
+sq_size     resb 1          ; side length of the square (1-9)
+sq_sym      resb 3          ; the symbol character to fill the square with
+sq_col      resb 3          ; colour storage (unused directly — colour applied via apply_colour)
+sq_row      resb 1          ; current row being drawn
+sq_col_ctr  resb 1          ; current column counter while drawing a row
+sq_temp     resb 1          ; general scratch byte
+sq_colptr   resq 1          ; pointer to the selected colour escape sequence
+
+; Hollow rectangle variables
+hrect_ibuf  resb 2          ; 2-byte input buffer (reads 1 digit + newline)
+hrect_width resb 1          ; width of the rectangle (1-9)
+hrect_height resb 1         ; height of the rectangle (1-9)
+hrect_cur_row resb 1        ; which row we are currently drawing
+hrect_cur_col resb 1        ; which column we are currently drawing within a row
+
+; ============================================================
+section .text
+    global _start            ; tell the linker where the program starts
+; ============================================================
+
+; ============================================================
+; SUBROUTINE: read_line
+; Reads one character at a time from the keyboard (stdin) into
+; the shared input[] buffer, stopping when Enter is pressed or
+; when 7 characters have been stored.
+; After returning, input[] contains the typed text followed by
+; a newline byte (10) as a terminator.
+; Uses r9 (character count) and r10 (pointer) — both safe across syscall.
+; ============================================================
+read_line:
+    xor  r9,  r9             ; r9 = 0 — start character count at zero
+    lea  r10, [input]        ; r10 points to the start of the input buffer
+.byte_loop:
+    mov  rax, 0              ; syscall 0 = sys_read (read from a file/keyboard)
+    mov  rdi, 0              ; file descriptor 0 = stdin (keyboard)
+    lea  rsi, [onebyte]      ; read into the 1-byte staging area
+    mov  rdx, 1              ; read exactly 1 byte
+    syscall                  ; ask the kernel to read one character
+    cmp  rax, 1              ; did we actually get a byte? (rax = bytes read)
+    jne  .finish             ; if not (EOF or error), stop reading
+    movzx rax, byte [onebyte] ; load the byte we just read into rax (zero-extended)
+    cmp  al, 10              ; is it a newline (Enter key)?
+    je   .finish             ; yes — user pressed Enter, stop reading
+    cmp  r9, 7               ; have we already stored 7 characters?
+    jge  .byte_loop          ; yes — keep reading to drain the line, but don't store more
+    mov  byte [r10 + r9], al ; store the character into input[r9]
+    inc  r9                  ; move to next position in buffer
+    jmp  .byte_loop          ; loop back to read the next character
+.finish:
+    mov  byte [r10 + r9], 10 ; place a newline at the end so parsers know where input ends
+    ret                      ; return to whoever called read_line
+
+; ============================================================
+; SUBROUTINE: parse_input
+; Reads the input[] buffer and converts a string of digits into
+; an integer number, stored in rbx.
+; If the input contains anything that isn't a digit, or is empty,
+; rbx is set to -1 to signal an error.
+; Handles up to 3 digits (max value 999).
+; ============================================================
+parse_input:
+    xor  rbx, rbx            ; rbx = 0 — this will accumulate the result
+    xor  r9,  r9             ; r9 = 0 — counts how many digits we've seen
+    lea  r8,  [input]        ; r8 points to the start of the input buffer
+.loop:
+    movzx rax, byte [r8]     ; load the next character from input
+    cmp  al, 10              ; is it a newline? (end of input)
+    je   .done               ; yes — we're done parsing
+    cmp  al, 0               ; is it a null byte? (also end of input)
+    je   .done
+    cmp  al, '0'             ; is it less than '0' (ASCII 48)?
+    jl   .err                ; yes — not a digit, error
+    cmp  al, '9'             ; is it greater than '9' (ASCII 57)?
+    jg   .err                ; yes — not a digit, error
+    sub  al, '0'             ; convert ASCII digit to actual number (e.g. '5' → 5)
+    imul rbx, 10             ; shift existing result left one decimal place (e.g. 3 → 30)
+    movzx rax, al            ; zero-extend the digit into rax
+    add  rbx, rax            ; add the new digit (e.g. 30 + 5 = 35)
+    inc  r9                  ; count this digit
+    inc  r8                  ; advance to next character in buffer
+    cmp  r9, 3               ; have we read 3 digits already?
+    jl   .loop               ; no — keep going
+    ; After exactly 3 digits, the very next character must be a newline
+    movzx rax, byte [r8]
+    cmp  al, 10
+    jne  .err                ; if not newline, input is too long — error
+    jmp  .done
+.err:
+    mov  rbx, -1             ; signal: input was invalid
+.done:
+    ret
+
+; ============================================================
+; SUBROUTINE: xorshift64
+; Generates the next pseudo-random 64-bit number using the
+; XOR-shift algorithm — a fast mathematical trick that produces
+; unpredictable-looking numbers from a starting "seed" value.
+; The three shifts (<<13, >>7, <<17) scramble the bits each call.
+; Result is returned in rax and also saved in rand_val for next call.
+; ============================================================
+xorshift64:
+    mov  rax, [rand_val]     ; load the current random state
+    cmp  rax, 0              ; if it's zero (bad state), use a safe default seed
+    jne  .shift
+    mov  rax, 6364136223846793005   ; fallback seed — a well-known constant
+.shift:
+    mov  r8,  rax
+    shl  r8,  13             ; shift left by 13, XOR in — scrambles the bits
+    xor  rax, r8
+    mov  r8,  rax
+    shr  r8,  7              ; shift right by 7, XOR in — more scrambling
+    xor  rax, r8
+    mov  r8,  rax
+    shl  r8,  17             ; shift left by 17, XOR in — final scramble
+    xor  rax, r8
+    mov  [rand_val], rax     ; save the new state for next time
+    ret                      ; rax = the new random number
+
+; ============================================================
+; SUBROUTINE: rand_range
+; Returns a random number between r13 (low) and r14 (high) inclusive.
+; e.g. r13=3, r14=7 → result is 3, 4, 5, 6, or 7 (randomly)
+; Result goes into rax.
+; r15 is saved/restored because it holds the current shape ID elsewhere.
+; ============================================================
+rand_range:
+    push r15                 ; save r15 — we need it as scratch, but callers use it for shape ID
+    mov  r15, r14
+    sub  r15, r13            ; r15 = high - low (the range size minus 1)
+    inc  r15                 ; r15 = range size (e.g. high=7, low=3 → r15=5)
+    call xorshift64          ; rax = a large random number
+    xor  rdx, rdx            ; clear rdx before division (div uses rdx:rax together)
+    div  r15                 ; divide random number by range size; rdx = remainder (0 to range-1)
+    add  rdx, r13            ; add low bound to get result in [low, high]
+    mov  rax, rdx            ; move result into rax for the caller
+    pop  r15                 ; restore r15 to what it was before
+    ret
+
+; ============================================================
+; SUBROUTINE: seed_random
+; Reads 8 bytes from /dev/urandom (Linux's true random source)
+; to set the initial seed for our random number generator.
+; This makes the random numbers different every time the program runs.
+; If /dev/urandom can't be opened (unlikely), the default seed is kept.
+; ============================================================
+seed_random:
+    mov  rax, 2              ; syscall 2 = sys_open (open a file)
+    mov  rdi, dev_urandom    ; the file path: "/dev/urandom"
+    mov  rsi, 0              ; flags = O_RDONLY (open for reading only)
+    xor  rdx, rdx            ; mode = 0 (not creating a file, so mode doesn't matter)
+    syscall                  ; ask kernel to open the file; rax = file descriptor (or negative on error)
+    cmp  rax, 0
+    jl   .done               ; if rax < 0, open failed — skip seeding, use default
+    mov  r8,  rax            ; save the file descriptor in r8 (safe across syscall)
+    mov  rax, 0              ; syscall 0 = sys_read
+    mov  rdi, r8             ; read from our urandom file descriptor
+    lea  rsi, [rand_val]     ; read directly into rand_val (8 bytes)
+    mov  rdx, 8              ; read 8 bytes
+    syscall                  ; rax = bytes actually read
+    mov  rax, 3              ; syscall 3 = sys_close (close the file)
+    mov  rdi, r8             ; close our file descriptor
+    syscall
+.done:
+    ret
+
+; ============================================================
+; SUBROUTINE: apply_colour_from_idx
+; Prints the colour escape sequence for the colour index in al (0-14).
+; Multiplies the index by 8 to get the byte offset into col_ptrs,
+; then reads the address and length and prints the escape sequence.
+; After calling this, all text printed will appear in that colour
+; until print_reset is called.
+; ============================================================
+apply_colour_from_idx:
+    movzx rax, al            ; zero-extend al into rax (clear upper bits)
+    imul  rax, 8             ; multiply by 8 — each entry in col_ptrs is 8 bytes (a pointer)
+    mov   rsi, [col_ptrs + rax]  ; load the address of the colour escape string
+    mov   rdx, [col_lens  + rax] ; load the length of that escape string
+    mov   rax, 1             ; syscall 1 = sys_write
+    mov   rdi, 1             ; stdout
+    syscall                  ; print the colour escape sequence
+    ret
+
+; ============================================================
+; SUBROUTINE: print_reset
+; Prints the colour reset escape sequence (ESC[0m + newline),
+; which restores the terminal's default text colour.
+; Always call this after finishing a coloured shape.
+; ============================================================
+print_reset:
+    PRINT col_reset, col_reset_len
+    ret
+
+; ============================================================
+; SUBROUTINE: print_spaces
+; Prints exactly r12 space characters to the screen.
+; Used to create indentation / padding before drawing symbols.
+; Decrements r12 each time until it reaches 0.
+; ============================================================
+print_spaces:
+    cmp  r12, 0              ; are there 0 spaces left to print?
+    jle  .done               ; yes — stop
+    PRINT space_char, 1      ; print one space
+    dec  r12                 ; one fewer space to print
+    jmp  print_spaces        ; repeat
+.done:
+    ret
+
+; ============================================================
+; SUBROUTINE: print_dmd_symbols
+; Prints exactly r12 copies of the diamond's chosen symbol character.
+; Works the same as print_spaces but uses dmd_symbol instead of space.
+; ============================================================
+print_dmd_symbols:
+    cmp  r12, 0              ; are there 0 symbols left to print?
+    jle  .done               ; yes — stop
+    PRINT dmd_symbol, 1      ; print one copy of the symbol
+    dec  r12                 ; one fewer symbol to print
+    jmp  print_dmd_symbols   ; repeat
+.done:
+    ret
+
+; ============================================================
+; SUBROUTINE: print_int
+; Converts the integer in rax to its text representation and prints it.
+; Example: rax=42 → prints "42" to the screen.
+; Works by repeatedly dividing by 10 and collecting remainders,
+; building the digit string right-to-left in para_numbuf.
+; ============================================================
+print_int:
+    push rbx                 ; save rbx — we use it as a pointer here
+    lea  rbx, [para_numbuf + 11]  ; point to the END of our scratch buffer
+    mov  byte [rbx], 0       ; place a null byte at the very end (safety terminator)
+    mov  r8,  10             ; we will divide by 10 repeatedly
+.cvt:
+    xor  rdx, rdx            ; clear rdx before division
+    div  r8                  ; rax = rax / 10, rdx = rax % 10 (the last digit)
+    add  dl, '0'             ; convert digit 0-9 to ASCII '0'-'9'
+    dec  rbx                 ; move one position left in the buffer
+    mov  [rbx], dl           ; store the ASCII digit
+    cmp  rax, 0              ; are there more digits?
+    jne  .cvt                ; yes — keep dividing
+    ; Now rbx points to the first character of the number string
+    lea  rdx, [para_numbuf + 11]
+    sub  rdx, rbx            ; rdx = number of characters to print
+    mov  rax, 1              ; sys_write
+    mov  rsi, rbx            ; start of the number string
+    mov  rdi, 1              ; stdout
+    syscall
+    pop  rbx                 ; restore rbx
+    ret
+
+; ============================================================
+; SUBROUTINE: htri_parse_uint
+; Parses digits from input[] into eax, returning -1 on error.
+; Similar to parse_input but uses 32-bit registers (eax/ecx/edx)
+; and has no digit-count limit (stops at newline or null).
+; Used specifically by the hollow triangle input routines.
+; ============================================================
+htri_parse_uint:
+    lea  rsi, [input]        ; rsi points to the start of input
+    xor  eax, eax            ; eax = 0 — will hold the result
+    xor  ecx, ecx            ; ecx = 0 — digit counter
+.next:
+    movzx edx, byte [rsi]    ; load next character
+    cmp  dl, 10              ; newline = end of number
+    je   .end
+    cmp  dl, 0               ; null = end of number
+    je   .end
+    cmp  dl, '0'             ; non-digit below '0'?
+    jl   .reject
+    cmp  dl, '9'             ; non-digit above '9'?
+    jg   .reject
+    sub  dl, '0'             ; convert ASCII to digit value
+    imul eax, eax, 10        ; shift result left one decimal place
+    add  eax, edx            ; add the new digit
+    cmp  eax, 100000         ; sanity check — reject absurdly large numbers
+    jg   .reject
+    inc  ecx                 ; count the digit
+    inc  rsi                 ; advance to next character
+    jmp  .next
+.end:
+    test ecx, ecx            ; were there any digits at all?
+    jz   .reject             ; no digits = empty input = error
+    ret                      ; eax = the parsed number
+.reject:
+    mov  eax, -1             ; signal error
+    ret
+
+; ============================================================
+; PROGRAM ENTRY POINT
+; ============================================================
+_start:
+    call seed_random         ; seed the random number generator from /dev/urandom
+
+; ============================================================
+; MAIN MENU
+; Shows the list of shapes and waits for the user to pick one.
+; Validates that input is a single digit 1-7 followed by Enter.
+; ============================================================
+main_menu:
+    PRINT main_banner, main_banner_len    ; print "ics group assignment"
+    PRINT main_menu_msg, main_menu_len    ; print the list of shape options
+    call read_line                        ; wait for the user to type something
+
+    lea  r8, [input]         ; r8 points to what the user typed
+    movzx rax, byte [r8]     ; load the first character
+    sub  rax, '0'            ; convert ASCII to number (e.g. '3' → 3)
+    cmp  rax, 1
+    jl   bad_main_menu       ; if less than 1, invalid
+    cmp  rax, 7
+    jg   bad_main_menu       ; if greater than 7, invalid
+    movzx r9, byte [r8 + 1]  ; load the second character
+    cmp  r9, 10
+    jne  bad_main_menu       ; if second char isn't newline, user typed more than one key — invalid
+
+    ; Route to the correct shape based on the number typed
+    cmp  rax, 1
+    je   shape_diamond
+    cmp  rax, 2
+    je   shape_right_triangle
+    cmp  rax, 3
+    je   shape_hollow_triangle
+    cmp  rax, 4
+    je   shape_parallelogram
+    cmp  rax, 5
+    je   shape_square
+    cmp  rax, 6
+    je   shape_hollow_rect
+    jmp  do_exit             ; only reaches here if rax == 7
+
+bad_main_menu:
+    PRINT err_menu, err_menu_len     ; tell the user their input was wrong
+    jmp  main_menu                   ; show the menu again
+
+; ============================================================
+; AFTER-SHAPE MENU
+; Shown after every shape is drawn. Asks: draw again, main menu, or exit?
+; r15d must hold the current shape's ID number (1-6) before jumping here,
+; so that "draw again" knows which shape to repeat.
+; ============================================================
+after_shape:
+    PRINT again_msg, again_len    ; print the "draw again?" prompt
+    call read_line                ; wait for user input
+    lea  r8, [input]
+    movzx rax, byte [r8]         ; first character typed
+    sub  rax, '0'                ; convert to number
+    movzx r9, byte [r8 + 1]      ; second character
+    cmp  r9, 10
+    jne  bad_after               ; must be just one key + Enter
+    cmp  rax, 1
+    je   repeat_shape            ; [1] = draw the same shape again
+    cmp  rax, 2
+    je   main_menu               ; [2] = go back to the main menu
+    cmp  rax, 3
+    je   do_exit                 ; [3] = exit the program
+bad_after:
+    PRINT err_again, err_again_len    ; invalid — show error and ask again
+    jmp  after_shape
+
+; ============================================================
+; REPEAT SHAPE
+; Jumps back to whichever shape was last drawn, based on r15d.
+; r15d was set at the start of each shape routine (e.g. mov r15d, 1 for diamond).
+; ============================================================
+repeat_shape:
+    cmp  r15d, 1
+    je   shape_diamond
+    cmp  r15d, 2
+    je   shape_right_triangle
+    cmp  r15d, 3
+    je   shape_hollow_triangle
+    cmp  r15d, 4
+    je   shape_parallelogram
+    cmp  r15d, 5
+    je   shape_square
+    cmp  r15d, 6
+    je   shape_hollow_rect
+    jmp  main_menu               ; fallback — should never reach here
+
+; ============================================================
+; EXIT
+; Prints goodbye message, then calls syscall 60 (sys_exit) with
+; exit code 0 (success) to cleanly terminate the program.
+; ============================================================
+do_exit:
+    PRINT goodbye_msg, goodbye_len
+    mov  rax, 60             ; syscall 60 = sys_exit
+    xor  rdi, rdi            ; exit code = 0 (success)
+    syscall
+
+; ============================================================
+; SHAPE 1 — DIAMOND
+; The diamond is made of a top half and a bottom half.
+; For each row i in the top half:
+;   leading spaces = offset + (height - i)    (gets smaller each row)
+;   symbols        = 2*i - 1                  (gets bigger each row: 1, 3, 5, ...)
+; For each row i in the bottom half:
+;   leading spaces = offset + i               (gets bigger each row)
+;   symbols        = 2*(height-i) - 1         (gets smaller each row)
+; ============================================================
+shape_diamond:
+    mov  r15d, 1             ; remember: shape ID 1 = diamond (used by repeat_shape)
+
+    ; Show diamond mode menu and read choice
+    PRINT dmd_menu_msg, dmd_menu_len
+    call read_line
+    lea  r8, [input]
+    movzx rax, byte [r8]     ; first character
+    movzx r9, byte [r8 + 1]  ; second character (must be newline)
+    cmp  r9, 10
+    jne  shape_diamond       ; if user typed more than one key, ask again
+    cmp  al, '1'
+    je   dmd_manual          ; [1] = manual mode
+    cmp  al, '2'
+    je   dmd_random          ; [2] = random mode
+    jmp  shape_diamond       ; anything else — ask again
+
+; --- Random mode: generate all parameters automatically ---
+dmd_random:
+    PRINT dmd_rand_msg, dmd_rand_len   ; tell user we're generating
+
+    ; Pick a random height between 3 and 30
+    mov  r13, 3
+    mov  r14, 30
+    call rand_range
+    mov  [dmd_height], rax
+
+    ; Pick a random offset (left indent) between 0 and 10
+    mov  r13, 0
+    mov  r14, 10
+    call rand_range
+    mov  [dmd_offset], rax
+
+    ; Pick a random colour index 0-14
+    mov  r13, 0
+    mov  r14, 14
+    call rand_range
+    mov  [dmd_coloridx], al
+
+    ; Pick a random symbol from the symbol_table string
+    mov  r13, 0
+    mov  r14, symbol_table_len - 1   ; indices 0 to (length-1)
+    call rand_range
+    lea  r8, [symbol_table]          ; r8 = address of first symbol
+    add  r8,  rax                    ; advance r8 by the random index
+    movzx rax, byte [r8]             ; load the symbol character at that position
+    mov  [dmd_symbol], al            ; store it
+    jmp  dmd_draw                    ; go draw
+
+; --- Manual mode: ask user for each parameter ---
+dmd_manual:
+dmd_get_height:
+    PRINT dmd_ph, dmd_ph_len         ; ask for height
+    call read_line
+    call parse_input                 ; convert typed digits to a number in rbx
+    cmp  rbx, -1
+    je   dmd_bad_h                   ; -1 means parse failed (non-digit typed)
+    cmp  rbx, 1
+    jl   dmd_bad_h                   ; less than 1 — out of range
+    cmp  rbx, 100
+    jg   dmd_bad_h                   ; more than 100 — out of range
+    mov  [dmd_height], rbx           ; valid — store it
+    jmp  dmd_get_offset
+dmd_bad_h:
+    PRINT err_dmd_h, err_dmd_h_len   ; show error
+    jmp  dmd_get_height              ; ask again
+
+dmd_get_offset:
+    PRINT dmd_po, dmd_po_len
+    call read_line
+    call parse_input
+    cmp  rbx, -1
+    je   dmd_bad_o
+    cmp  rbx, 0
+    jl   dmd_bad_o
+    cmp  rbx, 99
+    jg   dmd_bad_o
+    mov  [dmd_offset], rbx
+    jmp  dmd_get_color
+dmd_bad_o:
+    PRINT err_dmd_o, err_dmd_o_len
+    jmp  dmd_get_offset
+
+dmd_get_color:
+    PRINT dmd_pc, dmd_pc_len
+    call read_line
+    call parse_input
+    cmp  rbx, -1
+    je   dmd_bad_c
+    cmp  rbx, 1
+    jl   dmd_bad_c
+    cmp  rbx, 15
+    jg   dmd_bad_c
+    dec  rbx                         ; user sees colours 1-15, but table is 0-14, so subtract 1
+    mov  [dmd_coloridx], bl
+    jmp  dmd_get_symbol
+dmd_bad_c:
+    PRINT err_dmd_c, err_dmd_c_len
+    jmp  dmd_get_color
+
+dmd_get_symbol:
+    PRINT dmd_ps, dmd_ps_len
+    call read_line
+    lea  r8, [input]
+    movzx rax, byte [r8]     ; first character typed
+    cmp  al, 10
+    je   dmd_bad_s           ; empty input (just Enter) — reject
+    cmp  al, 32
+    jl   dmd_bad_s           ; below space (ASCII 32) — not printable
+    cmp  al, 126
+    jg   dmd_bad_s           ; above '~' (ASCII 126) — not printable
+    movzx r9, byte [r8 + 1]
+    cmp  r9, 10
+    jne  dmd_bad_s           ; more than one character typed — reject
+    mov  [dmd_symbol], al    ; valid single printable character — store it
+    jmp  dmd_draw
+dmd_bad_s:
+    PRINT err_dmd_s, err_dmd_s_len
+    jmp  dmd_get_symbol
+
+; --- Draw the diamond ---
+dmd_draw:
+    ; Apply the chosen colour to the terminal
+    mov al, byte [dmd_coloridx]
+    call  apply_colour_from_idx
+    PRINT newline, 1         ; blank line before the shape
+
+    mov  r14, [dmd_height]   ; r14 = height constant (used throughout drawing)
+    mov  r13, 1              ; r13 = row counter, starts at 1
+
+; --- Top half: rows 1 through height ---
+dmd_top:
+    cmp  r13, r14            ; have we gone past the last top row?
+    jg   dmd_bottom_start    ; yes — move on to bottom half
+
+    ; Calculate and print leading spaces: offset + (height - row)
+    mov  r12, [dmd_offset]
+    mov  rax, r14
+    sub  rax, r13            ; rax = height - row (shrinks each row)
+    add  r12, rax            ; r12 = total spaces to print
+    call print_spaces
+
+    ; Calculate and print symbols: 2*row - 1 (grows each row: 1, 3, 5, ...)
+    mov  r12, r13
+    imul r12, 2
+    dec  r12                 ; r12 = 2*row - 1
+    call print_dmd_symbols
+
+    PRINT newline, 1         ; end of this row
+    inc  r13                 ; next row
+    jmp  dmd_top
+
+; --- Bottom half: rows 1 through height-1 ---
+dmd_bottom_start:
+    mov  r13, 1              ; reset row counter to 1
+dmd_bottom:
+    mov  rax, r14
+    dec  rax                 ; rax = height - 1 (the last bottom row)
+    cmp  r13, rax
+    jg   dmd_done            ; if past (height-1), done
+
+    ; Calculate and print leading spaces: offset + row (grows each row)
+    mov  r12, [dmd_offset]
+    add  r12, r13            ; r12 = offset + row
+    call print_spaces
+
+    ; Calculate and print symbols: 2*(height-row) - 1 (shrinks each row)
+    mov  r12, r14
+    sub  r12, r13
+    imul r12, 2
+    dec  r12                 ; r12 = 2*(height - row) - 1
+    call print_dmd_symbols
+
+    PRINT newline, 1
+    inc  r13
+    jmp  dmd_bottom
+
+dmd_done:
+    call print_reset         ; reset terminal colour
+    jmp  after_shape         ; show the "draw again?" menu
+
+; ============================================================
+; SHAPE 2 — RIGHT TRIANGLE
+; Each row i (1 to height) prints exactly i stars.
+; Row 1: *
+; Row 2: **
+; Row 3: ***  ...and so on.
+; ============================================================
+shape_right_triangle:
+    mov  r15d, 2             ; shape ID = 2
+
+tri_get_height:
+    PRINT tri_ph, tri_ph_len          ; ask for height
+    call read_line
+    lea  r8, [input]
+    movzx rax, byte [r8]
+    sub  rax, '0'            ; convert ASCII digit to number
+    cmp  rax, 1
+    jl   tri_bad_h           ; less than 1 — invalid
+    cmp  rax, 9
+    jg   tri_bad_h           ; more than 9 — invalid
+    movzx r9, byte [r8 + 1]
+    cmp  r9, 10
+    jne  tri_bad_h           ; more than one character typed — invalid
+    mov  r14, rax            ; r14 = height
+    jmp  tri_draw
+tri_bad_h:
+    PRINT err_tri_h, err_tri_h_len
+    jmp  tri_get_height
+
+tri_draw:
+    PRINT newline, 1         ; blank line before shape
+    mov  r13, 1              ; r13 = current row (starts at 1)
+
+tri_outer:
+    cmp  r13, r14            ; drawn all rows?
+    jg   tri_done
+
+    mov  r12, r13            ; r12 = number of stars to print for this row = row number
+
+tri_inner:
+    cmp  r12, 0              ; any stars left to print?
+    jle  tri_next_line
+    PRINT star_char, 1       ; print one star
+    dec  r12
+    jmp  tri_inner
+
+tri_next_line:
+    PRINT newline, 1         ; move to next line
+    inc  r13                 ; advance row counter
+    jmp  tri_outer
+
+tri_done:
+    jmp  after_shape
+
+; ============================================================
+; SHAPE 3 — HOLLOW TRIANGLE
+; Draws an upward-pointing triangle that is hollow in the middle.
+; Row 0 (tip):  1 symbol (solid — it's just one character wide)
+; Middle rows:  symbol, inner spaces, symbol  (left and right edges only)
+; Last row (base): full solid row of symbols
+;
+; sym_count for row r = 2*r + 1
+; indent for row r    = x_offset + (height-1) - r
+; ============================================================
+shape_hollow_triangle:
+    mov  r15d, 3             ; shape ID = 3
+    PRINT htri_banner, htri_banner_len
+
+; Ask for symbol
+htri_ask_sym:
+    PRINT htri_ps, htri_ps_len
+    call read_line
+    lea  r8, [input]
+    movzx rax, byte [r8]
+    cmp  al, 10
+    je   htri_bad_sym        ; empty input
+    cmp  al, 33
+    jl   htri_bad_sym        ; ASCII 33 is '!' — anything below is space or control char
+    cmp  al, 126
+    jg   htri_bad_sym        ; ASCII 126 is '~' — last visible character
+    movzx r9, byte [r8 + 1]
+    cmp  r9, 10
+    jne  htri_bad_sym        ; more than one character typed
+    mov  [htri_sym], al      ; store the symbol
+    jmp  htri_ask_col
+htri_bad_sym:
+    PRINT err_htri_s, err_htri_s_len
+    jmp  htri_ask_sym
+
+; Ask for colour (0-7, standard ANSI colours only)
+htri_ask_col:
+    PRINT htri_pc, htri_pc_len
+    call read_line
+    lea  r8, [input]
+    movzx rax, byte [r8]
+    cmp  al, '0'
+    jl   htri_bad_col
+    cmp  al, '7'
+    jg   htri_bad_col
+    movzx r9, byte [r8 + 1]
+    cmp  r9, 10
+    jne  htri_bad_col
+    sub  al, '0'             ; convert '0'-'7' to number 0-7
+    mov  [htri_col], al      ; store colour number
+    jmp  htri_ask_height
+htri_bad_col:
+    PRINT err_htri_c, err_htri_c_len
+    jmp  htri_ask_col
+
+; Ask for height (3-20)
+htri_ask_height:
+    PRINT htri_ph, htri_ph_len
+    call read_line
+    call htri_parse_uint     ; parse into eax
+    cmp  eax, -1
+    je   htri_bad_height
+    cmp  eax, 3
+    jl   htri_bad_height
+    cmp  eax, 20
+    jg   htri_bad_height
+    mov  [htri_height], al   ; store height (fits in 1 byte since max=20)
+    jmp  htri_ask_x
+htri_bad_height:
+    PRINT err_htri_h, err_htri_h_len
+    jmp  htri_ask_height
+
+; Ask for horizontal offset (0-40)
+htri_ask_x:
+    PRINT htri_px, htri_px_len
+    call read_line
+    call htri_parse_uint
+    cmp  eax, -1
+    je   htri_bad_x
+    cmp  eax, 40
+    jg   htri_bad_x
+    mov  [htri_x], al        ; store offset
+    jmp  htri_build_esc
+htri_bad_x:
+    PRINT err_htri_x, err_htri_x_len
+    jmp  htri_ask_x
+
+; Build the colour escape string in memory at htri_colesc
+; The hollow triangle uses ANSI standard colours ESC[3Xm where X is 0-7
+htri_build_esc:
+    mov  byte [htri_colesc+0], 27    ; ESC character
+    mov  byte [htri_colesc+1], '['
+    mov  byte [htri_colesc+2], '3'
+    movzx rax, byte [htri_col]
+    add  rax, '0'                    ; convert colour number to digit character
+    mov  [htri_colesc+3], al         ; e.g. colour 2 → '2', giving "ESC[32m" = green
+    mov  byte [htri_colesc+4], 'm'
+
+    ; Initialise drawing variables
+    movzx r12d, byte [htri_height]   ; r12d = rows remaining to draw
+    mov   r14d, r12d                  ; r14d = total height (constant, used for indent calc)
+    movzx r15d, byte [htri_x]        ; r15d = x offset
+
+    ; We temporarily use r15 for x offset during drawing.
+    ; Push it so that after_shape can restore shape ID 3 into r15d.
+    push r15
+
+    xor  r13d, r13d                   ; r13d = current row index (starts at 0)
+
+; Draw each row of the hollow triangle
+htri_row:
+    test r12d, r12d          ; any rows left?
+    jz   htri_done
+
+    ; sym_count = 2*row + 1  (row 0 → 1 symbol, row 1 → 3, row 2 → 5, ...)
+    mov  eax, r13d
+    shl  eax, 1
+    inc  eax
+    mov  [htri_sc_mem], eax  ; save sym_count
+
+    ; indent = x + (height-1) - row  (decreases each row, triangle points up)
+    mov  eax, r14d
+    dec  eax
+    sub  eax, r13d
+    add  eax, r15d
+    mov  [htri_ind_mem], eax ; save indent amount
+
+    ; Print the colour escape sequence
+    PRINT htri_colesc, 5
+
+    ; Print indent spaces
+    mov  eax, [htri_ind_mem]
+    test eax, eax
+    jz   htri_indent_done    ; no indent needed
+    mov  [htri_ct_mem], eax
+    mov  ecx, eax
+    lea  rdi, [htri_rowbuf]
+    mov  al, ' '
+    rep  stosb               ; fill htri_rowbuf with 'ecx' spaces using rep stosb
+    PRINT htri_rowbuf, [htri_ct_mem]  ; print all spaces at once
+
+htri_indent_done:
+    ; Decide: solid row (tip or base) or hollow middle row?
+    test r13d, r13d
+    jz   htri_solid          ; row 0 = tip = solid (just 1 symbol anyway)
+    cmp  r12d, 1
+    je   htri_solid          ; last row (r12d=1 means 1 row left) = base = solid
+
+    ; --- Hollow middle row: left edge, spaces, right edge ---
+    movzx rax, byte [htri_sym]
+    mov   [htri_rowbuf], al
+    PRINT htri_rowbuf, 1     ; print left edge symbol
+
+    ; Print (sym_count - 2) inner spaces
+    mov  eax, [htri_sc_mem]
+    sub  eax, 2              ; subtract 2 for the two edge symbols
+    mov  [htri_ct_mem], eax
+    mov  ecx, eax
+    lea  rdi, [htri_rowbuf]
+    mov  al, ' '
+    rep  stosb               ; fill buffer with inner spaces
+    PRINT htri_rowbuf, [htri_ct_mem]
+
+    ; Print right edge symbol
+    movzx rax, byte [htri_sym]
+    mov   [htri_rowbuf], al
+    PRINT htri_rowbuf, 1
+    jmp   htri_row_end
+
+htri_solid:
+    ; --- Solid row: fill entirely with the symbol ---
+    mov  ebx, [htri_sc_mem]  ; number of symbols to print
+    movzx r9d, byte [htri_sym]
+    mov  [htri_ct_mem], ebx
+    mov  ecx, ebx
+    lea  rdi, [htri_rowbuf]
+    mov  al, r9b
+    rep  stosb               ; fill buffer with the symbol character
+    PRINT htri_rowbuf, [htri_ct_mem]
+
+htri_row_end:
+    PRINT newline, 1         ; end this row
+    inc  r13d                ; next row index
+    dec  r12d                ; one fewer row to draw
+    jmp  htri_row
+
+htri_done:
+    PRINT col_reset, col_reset_len   ; reset colour
+    pop r15                          ; restore r15 from before drawing (had x offset)
+    mov r15d, 3                      ; re-set shape ID = 3 for after_shape/repeat_shape
+    jmp  after_shape
+
+; ============================================================
+; SHAPE 4 — PARALLELOGRAM (random dimensions)
+; Draws a filled rectangle of stars, offset one space to the right
+; for each successive row, creating a slanted/parallelogram shape.
+; Dimensions are randomly generated (width 5-14, height 3-7).
+; ============================================================
+shape_parallelogram:
+    mov  r15d, 4             ; shape ID = 4
+
+    PRINT para_banner, para_banner_len
+    PRINT para_rand_msg, para_rand_len
+
+    ; Generate random width between 5 and 14
+    mov  r13, 5
+    mov  r14, 14
+    call rand_range
+    mov  [para_width], rax
+
+    ; Generate random height between 3 and 7
+    mov  r13, 3
+    mov  r14, 7
+    call rand_range
+    mov  [para_height], rax
+
+    ; Print "Width : <number>"
+    PRINT para_wlabel, para_wlabel_len
+    mov  rax, [para_width]
+    call print_int
+    PRINT newline, 1
+
+    ; Print "Height: <number>"
+    PRINT para_hlabel, para_hlabel_len
+    mov  rax, [para_height]
+    call print_int
+    PRINT newline, 1
+
+    PRINT para_shape_msg, para_shape_len
+
+    mov  r12, 0              ; r12 = current row index (starts at 0)
+
+; Loop through each row
+para_row_loop:
+    cmp  r12, [para_height]  ; drawn all rows?
+    je   para_done
+
+    ; Print r12 leading spaces (row 0 → 0 spaces, row 1 → 1 space, etc.)
+    mov  r13, r12            ; use r13 as a countdown for spaces
+para_space_loop:
+    cmp  r13, 0
+    je   para_stars          ; no more spaces — start printing stars
+    PRINT space_char, 1
+    dec  r13
+    jmp  para_space_loop
+
+; Print the stars for this row (always para_width stars)
+para_stars:
+    mov  r13, [para_width]   ; r13 = countdown for stars
+para_star_loop:
+    cmp  r13, 0
+    je   para_row_end        ; no more stars — end of row
+    PRINT star_char, 1
+    dec  r13
+    jmp  para_star_loop
+
+para_row_end:
+    PRINT newline, 1
+    inc  r12                 ; next row
+    jmp  para_row_loop
+
+para_done:
+    jmp  after_shape
+
+; ============================================================
+; SHAPE 5 — SQUARE
+; Draws a filled NxN square of a chosen symbol in a chosen colour.
+; User enters: size (1-9), symbol (any visible char), colour (1-6).
+; ============================================================
+shape_square:
+    mov  r15d, 5             ; shape ID = 5
+    PRINT sq_banner, sq_banner_len
+
+; Ask for size
+sq_ask_size:
+    PRINT sq_psize, sq_psize_len
+    call read_line
+    lea  r8, [input]
+    movzx rax, byte [r8]
+    cmp  al, '1'
+    jb   sq_bad_size         ; below '1' — invalid
+    cmp  al, '9'
+    ja   sq_bad_size         ; above '9' — invalid
+    movzx r9, byte [r8 + 1]
+    cmp  r9, 10
+    jne  sq_flush_size       ; user typed more than one character — drain and reject
+    sub  al, '0'             ; convert to number
+    mov  [sq_size], al       ; store size
+    jmp  sq_ask_sym
+
+; If user typed extra characters (e.g. "12"), drain the rest of the line first
+sq_flush_size:
+sq_flush_size_loop:
+    mov  rax, 0              ; sys_read
+    mov  rdi, 0              ; stdin
+    lea  rsi, [onebyte]
+    mov  rdx, 1
+    syscall
+    cmp  byte [onebyte], 10  ; keep reading until newline is found
+    jne  sq_flush_size_loop
+sq_bad_size:
+    PRINT err_sq_size, err_sq_size_len
+    jmp  sq_ask_size
+
+; Ask for symbol
+sq_ask_sym:
+    PRINT sq_psym, sq_psym_len
+    call read_line
+    lea  r8, [input]
+    movzx rax, byte [r8]
+    cmp  al, 10
+    je   sq_bad_sym          ; empty input
+    cmp  al, ' '
+    je   sq_bad_sym          ; space is not a "visible" symbol for drawing
+    cmp  al, 126
+    jg   sq_bad_sym          ; above '~' — not printable
+    movzx r9, byte [r8 + 1]
+    cmp  r9, 10
+    jne  sq_bad_sym          ; more than one character
+    mov  [sq_sym], al        ; store symbol
+    jmp  sq_ask_col
+sq_bad_sym:
+    PRINT err_sq_sym, err_sq_sym_len
+    jmp  sq_ask_sym
+
+; Ask for colour (1-6 maps to Red, Green, Yellow, Blue, Magenta, Cyan)
+sq_ask_col:
+    PRINT sq_pcol, sq_pcol_len
+    call read_line
+    lea  r8, [input]
+    movzx rax, byte [r8]
+    cmp  al, '1'
+    jb   sq_bad_col
+    cmp  al, '6'
+    ja   sq_bad_col
+    movzx r9, byte [r8 + 1]
+    cmp  r9, 10
+    jne  sq_bad_col
+    ; Convert '1'-'6' to 0-5 index and apply colour immediately
+    sub  al, '1'             ; '1'→0, '2'→1, ... '6'→5
+    call apply_colour_from_idx   ; set terminal colour now (stays active for whole square)
+    jmp  sq_draw
+sq_bad_col:
+    PRINT err_sq_col, err_sq_col_len
+    jmp  sq_ask_col
+
+; Draw the square: size rows, each with size symbols
+sq_draw:
+    movzx r14, byte [sq_size]    ; r14 = total rows to draw
+    mov   r13, r14               ; r13 = row countdown
+
+sq_row_loop:
+    cmp  r13, 0
+    je   sq_done                 ; all rows drawn
+
+    mov  r12, r14                ; r12 = column countdown (size symbols per row)
+sq_col_loop:
+    cmp  r12, 0
+    je   sq_newline              ; finished this row
+
+    PRINT sq_sym, 1              ; print one symbol
+    dec  r12
+    jmp  sq_col_loop
+
+sq_newline:
+    PRINT newline, 1
+    dec  r13                     ; one fewer row to draw
+    jmp  sq_row_loop
+
+sq_done:
+    call print_reset             ; reset colour after square is done
+    jmp  after_shape
+
+; ============================================================
+; SHAPE 6 — HOLLOW RECTANGLE
+; Draws a rectangle where only the border is filled with stars.
+; Top row:    full row of stars
+; Middle rows: star, spaces, star  (hollow interior)
+; Bottom row: full row of stars
+; ============================================================
+shape_hollow_rect:
+    mov  r15d, 6             ; shape ID = 6
+    PRINT hrect_banner, hrect_banner_len
+
+; Ask for width (reads 2 bytes at once: the digit + newline)
+hrect_ask_width:
+    PRINT hrect_pw, hrect_pw_len
+    mov  rax, 0              ; sys_read
+    mov  rdi, 0              ; stdin
+    lea  rsi, [hrect_ibuf]   ; read into hrect_ibuf (2 bytes)
+    mov  rdx, 2
+    syscall
+    mov  al, [hrect_ibuf]    ; first byte = the digit typed
+    cmp  al, '1'
+    jb   hrect_bad_w
+    cmp  al, '9'
+    ja   hrect_bad_w
+    sub  al, '0'             ; convert to number
+    mov  [hrect_width], al   ; store width
+    jmp  hrect_ask_height
+hrect_bad_w:
+    PRINT err_hrect, err_hrect_len
+    jmp  hrect_ask_width
+
+; Ask for height
+hrect_ask_height:
+    PRINT hrect_ph, hrect_ph_len
+    mov  rax, 0
+    mov  rdi, 0
+    lea  rsi, [hrect_ibuf]
+    mov  rdx, 2
+    syscall
+    mov  al, [hrect_ibuf]
+    cmp  al, '1'
+    jb   hrect_bad_h
+    cmp  al, '9'
+    ja   hrect_bad_h
+    sub  al, '0'
+    mov  [hrect_height], al
+    jmp  hrect_draw
+hrect_bad_h:
+    PRINT err_hrect, err_hrect_len
+    jmp  hrect_ask_height
+
+; Draw the hollow rectangle
+hrect_draw:
+    PRINT hrect_shape_msg, hrect_shape_len
+    mov  byte [hrect_cur_row], 0    ; start at row 0
+
+hrect_row_loop:
+    mov  al, [hrect_cur_row]
+    cmp  al, [hrect_height]
+    je   hrect_done                 ; drawn all rows
+
+    ; Is this the top row? (row index 0)
+    cmp  al, 0
+    je   hrect_full_row             ; yes — solid border row
+
+    ; Is this the bottom row? (row index = height - 1)
+    mov  al, [hrect_height]
+    dec  al                         ; al = height - 1
+    mov  ah, [hrect_cur_row]
+    cmp  ah, al
+    je   hrect_full_row             ; yes — solid border row
+
+    ; --- Middle (hollow) row: star, spaces, star ---
+    PRINT star_char, 1              ; left border star
+    mov  al, [hrect_width]
+    cmp  al, 1
+    je   hrect_end_row              ; if width=1, there's no space for interior or right star
+
+    sub  al, 2                      ; number of interior spaces = width - 2
+    mov  [hrect_cur_col], al        ; use hrect_cur_col as space countdown
+
+hrect_space_loop:
+    cmp  byte [hrect_cur_col], 0
+    je   hrect_close_star           ; printed all interior spaces
+    PRINT space_char, 1
+    dec  byte [hrect_cur_col]
+    jmp  hrect_space_loop
+
+hrect_close_star:
+    PRINT star_char, 1              ; right border star
+    jmp  hrect_end_row
+
+; --- Full (solid) border row: print width stars ---
+hrect_full_row:
+    mov  al, [hrect_width]
+    mov  [hrect_cur_col], al        ; use hrect_cur_col as star countdown
+
+hrect_star_loop:
+    cmp  byte [hrect_cur_col], 0
+    je   hrect_end_row              ; printed all stars for this row
+    PRINT star_char, 1
+    dec  byte [hrect_cur_col]
+    jmp  hrect_star_loop
+
+hrect_end_row:
+    PRINT newline, 1
+    inc  byte [hrect_cur_row]       ; move to the next row
+    jmp  hrect_row_loop
+
+hrect_done:
+    jmp  after_shape
